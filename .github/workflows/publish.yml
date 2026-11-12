@@ -1,0 +1,50 @@
+# Publishes a Roomy release.
+# Files arrive on a branch named incoming/<version>, split into parts under GitHub's 100 MB file limit.
+# This job joins the parts, checks every file against checksums.json, creates the release, then deletes the branch.
+name: Publish release
+on:
+  push:
+    branches: ['incoming/**']
+permissions:
+  contents: write
+concurrency: publish
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Join parts and verify
+        working-directory: payload
+        run: |
+          set -euo pipefail
+          for first in *.part-aa; do
+            [ -e "$first" ] || continue
+            name="${first%.part-aa}"
+            cat "$name".part-* > "$name"
+            rm "$name".part-*
+          done
+          python3 - <<'PY'
+          import json, hashlib, base64, os, sys
+          sums = json.load(open('checksums.json'))
+          bad = []
+          for name, want in sums.items():
+              if not os.path.exists(name):
+                  continue
+              got = base64.b64encode(hashlib.sha512(open(name, 'rb').read()).digest()).decode()
+              print(('ok  ' if got == want else 'BAD ') + name)
+              if got != want: bad.append(name)
+          sys.exit(1 if bad else 0)
+          PY
+          ls -la
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="$(cat payload/VERSION)"
+          gh release delete "v$V" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "v$V" --title "Roomy $V" --notes-file payload/NOTES.md --latest \
+            $(ls payload/* | grep -v -e '/VERSION$' -e '/NOTES.md$')
+      - name: Remove the upload branch
+        if: success()
+        run: git push origin --delete "${GITHUB_REF_NAME}"
